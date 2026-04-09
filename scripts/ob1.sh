@@ -11,16 +11,20 @@
 
 set -euo pipefail
 
-OB1_URL="${OB1_URL:-https://tcsyaidvgtwrsujmaklz.supabase.co/functions/v1/open-brain-mcp}"
-OB1_KEY="${OB1_KEY:-}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/../.env"
 
-if [[ -z "$OB1_KEY" ]] && command -v jq &>/dev/null; then
-  OB1_KEY=$(jq -r '.mcpServers["Open-OB1"].headers["x-brain-key"] // empty' \
-    ~/.copilot/mcp-config.json 2>/dev/null || true)
+# Load .env if present
+if [[ -f "$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  set -o allexport; source "$ENV_FILE"; set +o allexport
 fi
 
+OB1_URL="${OB1_URL:-${SUPABASE_URL:-https://tcsyaidvgtwrsujmaklz.supabase.co}/functions/v1/open-brain-mcp}"
+OB1_KEY="${OB1_KEY:-${MCP_ACCESS_KEY:-}}"
+
 if [[ -z "$OB1_KEY" ]]; then
-  echo "Error: set OB1_KEY env var or ensure ~/.copilot/mcp-config.json has Open-OB1.headers.x-brain-key" >&2
+  echo "Error: MCP_ACCESS_KEY not found in .env and OB1_KEY not set" >&2
   exit 1
 fi
 
