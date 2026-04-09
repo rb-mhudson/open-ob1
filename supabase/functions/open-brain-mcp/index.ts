@@ -104,25 +104,67 @@ server.registerTool(
         };
       }
 
-      if (!data || data.length === 0) {
+      // Filter out expired thoughts
+      const now = new Date();
+      const vectorActive = (data || []).filter(
+        (t: { expiry?: string }) => !t.expiry || new Date(t.expiry) > now
+      );
+
+      // Topic keyword fallback: find thoughts whose topic tags match any query word
+      const vectorIds = new Set(vectorActive.map((t: { id: string }) => t.id));
+      const queryWords = [...new Set(query.toLowerCase().split(/\s+/).filter((w) => w.length > 1))];
+      const topicHits: Record<string, unknown>[] = [];
+      for (const word of queryWords) {
+        const { data: td } = await supabase
+          .from("thoughts")
+          .select("id, content, metadata, created_at, expiry, recall_counter")
+          .contains("metadata", { topics: [word] })
+          .or(`expiry.is.null,expiry.gt.${now.toISOString()}`)
+          .limit(limit);
+        for (const t of td || []) {
+          if (!vectorIds.has(t.id) && !topicHits.find((h) => h.id === t.id)) {
+            topicHits.push({ ...t, similarity: null, keyword_match: true });
+          }
+        }
+      }
+
+      // Merge: vector results first, then topic-only hits
+      const active = [...vectorActive, ...topicHits];
+
+      if (active.length === 0) {
         return {
           content: [{ type: "text" as const, text: `No thoughts found matching "${query}".` }],
         };
       }
 
-      const results = data.map(
+      // Stamp recall on high-confidence hits (>= 0.8 similarity)
+      const recallIds = active
+        .filter((t: { similarity: number | null }) => t.similarity != null && t.similarity >= 0.8)
+        .map((t: { id: string }) => t.id);
+      if (recallIds.length > 0) {
+        await supabase.rpc("record_recall", { p_ids: recallIds });
+      }
+
+      const results = active.map(
         (
           t: {
+            id: string;
             content: string;
             metadata: Record<string, unknown>;
-            similarity: number;
+            similarity: number | null;
+            keyword_match?: boolean;
             created_at: string;
+            expiry?: string;
+            recall_counter?: number;
           },
           i: number
         ) => {
           const m = t.metadata || {};
+          const matchLabel = t.keyword_match
+            ? "topic keyword match"
+            : `${(t.similarity! * 100).toFixed(1)}% match`;
           const parts = [
-            `--- Result ${i + 1} (${(t.similarity * 100).toFixed(1)}% match) ---`,
+            `--- Result ${i + 1} (${matchLabel}) [${t.id}] ---`,
             `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
             `Type: ${m.type || "unknown"}`,
           ];
@@ -132,6 +174,8 @@ server.registerTool(
             parts.push(`People: ${(m.people as string[]).join(", ")}`);
           if (Array.isArray(m.action_items) && m.action_items.length)
             parts.push(`Actions: ${(m.action_items as string[]).join("; ")}`);
+          if (t.expiry) parts.push(`Expires: ${new Date(t.expiry).toLocaleDateString()}`);
+          if (t.recall_counter) parts.push(`Recalled: ${t.recall_counter}x`);
           parts.push(`\n${t.content}`);
           return parts.join("\n");
         }
@@ -141,7 +185,7 @@ server.registerTool(
         content: [
           {
             type: "text" as const,
-            text: `Found ${data.length} thought(s):\n\n${results.join("\n\n")}`,
+            text: `Found ${active.length} thought(s):\n\n${results.join("\n\n")}`,
           },
         ],
       };
@@ -167,13 +211,14 @@ server.registerTool(
       topic: z.string().optional().describe("Filter by topic tag"),
       person: z.string().optional().describe("Filter by person mentioned"),
       days: z.number().optional().describe("Only thoughts from the last N days"),
+      include_expired: z.boolean().optional().default(false).describe("Include expired thoughts (admin use)"),
     },
   },
-  async ({ limit, type, topic, person, days }) => {
+  async ({ limit, type, topic, person, days, include_expired }) => {
     try {
       let q = supabase
         .from("thoughts")
-        .select("content, metadata, created_at")
+        .select("id, content, metadata, created_at, expiry, recall_counter")
         .order("created_at", { ascending: false })
         .limit(limit);
 
@@ -185,6 +230,7 @@ server.registerTool(
         since.setDate(since.getDate() - days);
         q = q.gte("created_at", since.toISOString());
       }
+      if (!include_expired) q = q.or(`expiry.is.null,expiry.gt.${new Date().toISOString()}`);
 
       const { data, error } = await q;
 
@@ -201,12 +247,16 @@ server.registerTool(
 
       const results = data.map(
         (
-          t: { content: string; metadata: Record<string, unknown>; created_at: string },
+          t: { id: string; content: string; metadata: Record<string, unknown>; created_at: string; expiry?: string; recall_counter?: number },
           i: number
         ) => {
           const m = t.metadata || {};
           const tags = Array.isArray(m.topics) ? (m.topics as string[]).join(", ") : "";
-          return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}`;
+          const extra = [
+            t.expiry ? `expires:${new Date(t.expiry).toLocaleDateString()}` : "",
+            t.recall_counter ? `recalled:${t.recall_counter}x` : "",
+          ].filter(Boolean).join(" ");
+          return `${i + 1}. [${t.id}] [${new Date(t.created_at).toLocaleDateString()}] (${m.type || "??"}${tags ? " - " + tags : ""})${extra ? " " + extra : ""}\n   ${t.content}`;
         }
       );
 
@@ -233,7 +283,7 @@ server.registerTool(
   {
     title: "Thought Statistics",
     description: "Get a summary of all captured thoughts: totals, types, top topics, and people.",
-    inputSchema: {},
+    inputSchema: z.object({}),
   },
   async () => {
     try {
@@ -362,6 +412,105 @@ server.registerTool(
   }
 );
 
+// Tool 5: Update Thought
+server.registerTool(
+  "update_thought",
+  {
+    title: "Update Thought",
+    description:
+      "Update an existing thought by ID. Can patch content (re-embeds), merge metadata fields, set an expiry date, or archive (soft-delete) it.",
+    inputSchema: {
+      id: z.string().describe("UUID of the thought to update"),
+      content: z.string().optional().describe("Replace content — triggers re-embedding and new fingerprint"),
+      metadata_patch: z.record(z.unknown()).optional().describe("Fields to merge into existing metadata"),
+      expiry: z.string().nullable().optional().describe("ISO date after which the thought is hidden, or null to clear"),
+      archived: z.boolean().optional().describe("Set true to soft-delete (sets expiry to now)"),
+    },
+  },
+  async ({ id, content, metadata_patch, expiry, archived }) => {
+    try {
+      // Fetch existing thought
+      const { data: existing, error: fetchError } = await supabase
+        .from("thoughts")
+        .select("id, content, metadata, content_fingerprint")
+        .eq("id", id)
+        .single();
+
+      if (fetchError || !existing) {
+        return {
+          content: [{ type: "text" as const, text: `Thought not found: ${id}` }],
+          isError: true,
+        };
+      }
+
+      const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+      const changed: string[] = [];
+
+      // Content update — re-fingerprint and re-embed
+      if (content !== undefined) {
+        const [embedding, metadata] = await Promise.all([
+          getEmbedding(content),
+          extractMetadata(content),
+        ]);
+        const { error: upsertError } = await supabase.rpc("upsert_thought", {
+          p_content: content,
+          p_payload: { metadata: { ...metadata, source: "mcp" } },
+        });
+        if (upsertError) {
+          return {
+            content: [{ type: "text" as const, text: `Failed to update content: ${upsertError.message}` }],
+            isError: true,
+          };
+        }
+        await supabase.from("thoughts").update({ embedding }).eq("id", id);
+        changed.push("content");
+      }
+
+      // Metadata patch — merge into existing
+      if (metadata_patch !== undefined) {
+        updates.metadata = { ...(existing.metadata || {}), ...metadata_patch };
+        changed.push("metadata");
+      }
+
+      // Expiry — set or clear
+      if (archived) {
+        updates.expiry = new Date().toISOString();
+        changed.push("archived");
+      } else if (expiry !== undefined) {
+        updates.expiry = expiry ?? null;
+        changed.push(expiry ? `expiry→${expiry}` : "expiry cleared");
+      }
+
+      if (Object.keys(updates).length > 1) {
+        const { error: updateError } = await supabase
+          .from("thoughts")
+          .update(updates)
+          .eq("id", id);
+        if (updateError) {
+          return {
+            content: [{ type: "text" as const, text: `Update failed: ${updateError.message}` }],
+            isError: true,
+          };
+        }
+      }
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: changed.length
+            ? `Updated [${id}]: ${changed.join(", ")}`
+            : `No changes applied to [${id}]`,
+        }],
+      };
+    } catch (err: unknown) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
 // --- Hono App with Auth + CORS ---
 
 const corsHeaders = {
@@ -369,6 +518,9 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-brain-key, accept, mcp-session-id",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
 };
+
+// Create transport once and reuse across requests (required by @hono/mcp@0.2.x)
+const transport = new StreamableHTTPTransport();
 
 const app = new Hono();
 
@@ -384,24 +536,10 @@ app.all("*", async (c) => {
     return c.json({ error: "Invalid or missing access key" }, 401, corsHeaders);
   }
 
-  // Fix: Claude Desktop connectors don't send the Accept header that
-  // StreamableHTTPTransport requires. Build a patched request if missing.
-  // See: https://github.com/NateBJones-Projects/OB1/issues/33
-  if (!c.req.header("accept")?.includes("text/event-stream")) {
-    const headers = new Headers(c.req.raw.headers);
-    headers.set("Accept", "application/json, text/event-stream");
-    const patched = new Request(c.req.raw.url, {
-      method: c.req.raw.method,
-      headers,
-      body: c.req.raw.body,
-      // @ts-ignore -- duplex required for streaming body in Deno
-      duplex: "half",
-    });
-    Object.defineProperty(c.req, "raw", { value: patched, writable: true });
+  if (!server.isConnected()) {
+    await server.connect(transport);
   }
 
-  const transport = new StreamableHTTPTransport();
-  await server.connect(transport);
   return transport.handleRequest(c);
 });
 
