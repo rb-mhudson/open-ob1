@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# ob1.sh — quick curl wrapper for the Open-OB1 MCP server
+# call-mcp-service.sh — quick curl wrapper for the Open-OB1 MCP server
 #
 # Usage:
-#   ./scripts/ob1.sh list [limit]
-#   ./scripts/ob1.sh search <query> [limit]
-#   ./scripts/ob1.sh stats
+#   ./scripts/call-mcp-service.sh [stats]
+#   ./scripts/call-mcp-service.sh list [limit]
+#   ./scripts/call-mcp-service.sh dump
+#   ./scripts/call-mcp-service.sh search <query> [limit]
 #
 # Reads OB1_URL and OB1_KEY from environment, or falls back to
 # the values in ~/.copilot/mcp-config.json (jq required for fallback).
@@ -39,7 +40,7 @@ ob1_call() {
   | grep '^data:' | sed 's/^data: //' | jq -r '.result.content[0].text // .error.message // .'
 }
 
-CMD="${1:-list}"
+CMD="${1:-stats}"
 shift || true
 
 case "$CMD" in
@@ -52,11 +53,14 @@ case "$CMD" in
     LIMIT="${2:-10}"
     ob1_call "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"search_thoughts\",\"arguments\":{\"query\":$(printf '%s' "$QUERY" | jq -Rs .),\"limit\":$LIMIT}}}"
     ;;
+  dump)
+    ob1_call '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_thoughts","arguments":{"limit":1000,"include_expired":true}}}'
+    ;;
   stats)
     ob1_call '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}'
     ;;
   *)
-    echo "Usage: ob1.sh [list [limit] | search <query> [limit] | stats]" >&2
+    echo "Usage: call-mcp-service.sh [stats | list [limit] | dump | search <query> [limit]]" >&2
     exit 1
     ;;
 esac
