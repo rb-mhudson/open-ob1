@@ -42,7 +42,7 @@ async function sync() {
     const { id, content, metadata, created_at } = thought;
     const m = metadata || {};
     const date = new Date(created_at).toISOString().split("T")[0];
-    
+
     // Create a filename based on date and first few words of content
     const snippet = content.slice(0, 30).replace(/[^a-z0-9]/gi, "_").toLowerCase();
     const filename = `${date}_${snippet}_${id.slice(0, 5)}.md`;
