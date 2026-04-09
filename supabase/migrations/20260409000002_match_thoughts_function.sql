@@ -1,5 +1,7 @@
 -- Migration: semantic search RPC function
 
+SET search_path TO public, extensions;
+
 create or replace function match_thoughts(
   query_embedding vector(1536),
   match_threshold float default 0.7,

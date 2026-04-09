@@ -1,3 +1,6 @@
+
+create extension if not exists vector with schema extensions;
+
 -- Migration: create thoughts table with indexes and updated_at trigger
 
 create table if not exists thoughts (
@@ -11,7 +14,8 @@ create table if not exists thoughts (
 
 -- Fast vector similarity search
 create index if not exists thoughts_embedding_idx
-  on thoughts using hnsw (embedding vector_cosine_ops);
+  -- on thoughts using hnsw (embedding vector_cosine_ops);
+  on thoughts using hnsw (embedding extensions.vector_cosine_ops);
 
 -- Metadata JSONB filtering
 create index if not exists thoughts_metadata_idx
