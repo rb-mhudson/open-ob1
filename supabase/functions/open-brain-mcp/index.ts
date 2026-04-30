@@ -204,8 +204,9 @@ server.registerTool(
   {
     title: "List Recent Thoughts",
     description:
-      "List recently captured thoughts with optional filters by type, topic, person, or time range.",
+      "List recently captured thoughts with optional filters by type, topic, person, or time range. Optionally retrieve by ID.",
     inputSchema: {
+      id: z.string().optional().describe("UUID of specific thought to retrieve"),
       limit: z.number().optional().default(10),
       type: z.string().optional().describe("Filter by type: observation, task, idea, reference, person_note"),
       topic: z.string().optional().describe("Filter by topic tag"),
@@ -214,8 +215,45 @@ server.registerTool(
       include_expired: z.boolean().optional().default(false).describe("Include expired thoughts (admin use)"),
     },
   },
-  async ({ limit, type, topic, person, days, include_expired }) => {
+  async ({ id, limit, type, topic, person, days, include_expired }) => {
     try {
+      // If ID provided, fetch directly without filters
+      if (id) {
+        const { data: thought, error } = await supabase
+          .from("thoughts")
+          .select("id, content, metadata, created_at, expiry, recall_counter")
+          .eq("id", id)
+          .single();
+
+        if (error || !thought) {
+          return {
+            content: [{ type: "text" as const, text: `Thought not found: ${id}` }],
+            isError: true,
+          };
+        }
+
+        const m = thought.metadata || {};
+        const parts = [
+          `[${thought.id}]`,
+          `Captured: ${new Date(thought.created_at).toLocaleDateString()}`,
+          `Type: ${m.type || "unknown"}`,
+        ];
+        if (Array.isArray(m.topics) && m.topics.length)
+          parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
+        if (Array.isArray(m.people) && m.people.length)
+          parts.push(`People: ${(m.people as string[]).join(", ")}`);
+        if (Array.isArray(m.action_items) && m.action_items.length)
+          parts.push(`Actions: ${(m.action_items as string[]).join("; ")}`);
+        if (thought.expiry) parts.push(`Expires: ${new Date(thought.expiry).toLocaleDateString()}`);
+        if (thought.recall_counter) parts.push(`Recalled: ${thought.recall_counter}x`);
+        parts.push(`\n${thought.content}`);
+
+        return {
+          content: [{ type: "text" as const, text: parts.join("\n") }],
+        };
+      }
+
+      // Otherwise, apply filters and list
       let q = supabase
         .from("thoughts")
         .select("id, content, metadata, created_at, expiry, recall_counter")
@@ -446,23 +484,24 @@ server.registerTool(
       const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
       const changed: string[] = [];
 
-      // Content update — re-fingerprint and re-embed
+      // Content update — re-fingerprint and re-embed in place
       if (content !== undefined) {
         const [embedding, metadata] = await Promise.all([
           getEmbedding(content),
           extractMetadata(content),
         ]);
-        const { error: upsertError } = await supabase.rpc("upsert_thought", {
-          p_content: content,
-          p_payload: { metadata: { ...metadata, source: "mcp" } },
-        });
-        if (upsertError) {
-          return {
-            content: [{ type: "text" as const, text: `Failed to update content: ${upsertError.message}` }],
-            isError: true,
-          };
-        }
-        await supabase.from("thoughts").update({ embedding }).eq("id", id);
+        const normalized = content.toLowerCase().trim().replace(/\s+/g, " ");
+        const hashBuffer = await crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode(normalized),
+        );
+        const fingerprint = Array.from(new Uint8Array(hashBuffer))
+          .map((b) => b.toString(16).padStart(2, "0"))
+          .join("");
+        updates.content = content;
+        updates.content_fingerprint = fingerprint;
+        updates.embedding = embedding;
+        updates.metadata = { ...metadata, source: "mcp" };
         changed.push("content");
       }
 
