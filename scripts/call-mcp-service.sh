@@ -21,8 +21,14 @@ if [[ -f "$ENV_FILE" ]]; then
   set -o allexport; source "$ENV_FILE"; set +o allexport
 fi
 
-OB1_URL="${OB1_URL:-${SUPABASE_URL:-https://tcsyaidvgtwrsujmaklz.supabase.co}/functions/v1/open-brain-mcp}"
+OB1_URL="${OB1_URL:-${SUPABASE_URL:+${SUPABASE_URL}/functions/v1/open-brain-mcp}}"
 OB1_KEY="${OB1_KEY:-${MCP_ACCESS_KEY:-}}"
+
+if [[ -z "$OB1_URL" || "$OB1_URL" == *"your-project-ref"* ]]; then
+  echo "Error: OB1_URL is not set or contains the 'your-project-ref' placeholder." >&2
+  echo "Please set SUPABASE_URL in your .env file or export OB1_URL." >&2
+  exit 1
+fi
 
 if [[ -z "$OB1_KEY" ]]; then
   echo "Error: MCP_ACCESS_KEY not found in .env and OB1_KEY not set" >&2
@@ -31,13 +37,32 @@ fi
 
 ob1_call() {
   local body="$1"
-  curl -s "$OB1_URL" \
+  local response
+  response=$(curl -s -w "\n%{http_code}" "$OB1_URL" \
     -X POST \
     -H "Content-Type: application/json" \
     -H "Accept: application/json, text/event-stream" \
     -H "x-brain-key: $OB1_KEY" \
-    -d "$body" \
-  | grep '^data:' | sed 's/^data: //' | jq -r '.result.content[0].text // .error.message // .'
+    -d "$body")
+
+  local http_code
+  http_code=$(echo "$response" | tail -n1)
+  local content
+  content=$(echo "$response" | sed '$d')
+
+  if [[ "$http_code" -ne 200 ]]; then
+    echo "Error: Request failed with HTTP $http_code" >&2
+    echo "$content" >&2
+    exit 1
+  fi
+
+  if echo "$content" | grep -q '^data:'; then
+    echo "$content" | grep '^data:' | sed 's/^data: //' | jq -r '.result.content[0].text // .error.message // .'
+  else
+    echo "Error: Unexpected response format" >&2
+    echo "$content" | jq -r '.result.content[0].text // .error.message // .' 2>/dev/null || echo "$content" >&2
+    exit 1
+  fi
 }
 
 CMD="${1:-stats}"
