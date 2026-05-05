@@ -406,7 +406,7 @@ app.options("*", (c) => c.text("ok", 200, corsHeaders));
 app.get("/.well-known/oauth-protected-resource/mcp", (c) => {
   return c.json({
     resource: `${SUPABASE_URL}/functions/v1/open-brain-mcp`,
-    authorization_servers: [SUPABASE_URL]
+    authorization_servers: [`${SUPABASE_URL}/auth/v1`]
   }, 200, corsHeaders);
 });
 
@@ -417,7 +417,7 @@ app.all("*", async (c) => {
   if (path.includes("/.well-known/oauth-protected-resource/mcp")) {
     return c.json({
       resource: `${SUPABASE_URL}/functions/v1/open-brain-mcp`,
-      authorization_servers: [SUPABASE_URL]
+      authorization_servers: [`${SUPABASE_URL}/auth/v1`]
     }, 200, corsHeaders);
   }
 
