@@ -1,5 +1,9 @@
 .env
 .env.local
+.mcp.json*
+.claude/
+.codegraph/
+.vscode/
 node_modules/
 tmp/
 *.log
