@@ -200,14 +200,15 @@ function createScopedServer(userId: string | null) {
         person: z.string().optional().describe("Filter by person mentioned"),
         days: z.number().optional().describe("Only thoughts from the last N days"),
         include_expired: z.boolean().optional().default(false).describe("Include expired thoughts (admin use)"),
+        order: z.enum(["asc", "desc"]).optional().default("desc").describe("Sort order by created_at: 'desc' (newest first, default) or 'asc' (oldest first)"),
       },
     },
-    async ({ id, limit, type, topic, person, days, include_expired }) => {
+    async ({ id, limit, type, topic, person, days, include_expired, order }) => {
       try {
         let q = supabase
           .from("thoughts")
           .select("id, content, metadata, created_at, expiry, recall_counter")
-          .order("created_at", { ascending: false });
+          .order("created_at", { ascending: order === "asc" });
 
         if (id) q = q.eq("id", id);
         if (userId) q = q.eq("user_id", userId);
