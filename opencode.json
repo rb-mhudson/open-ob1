@@ -1,0 +1,14 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "Open-OB1": {
+      "enabled": true,
+      "tools": [ "*" ],
+      "type": "remote",
+      "url": "https://tcsyaidvgtwrsujmaklz.supabase.co/functions/v1/open-brain-mcp",
+      "headers": {
+        "x-brain-key": "{env:OPENBRAIN_API_KEY}"
+      }
+    }
+  }
+}
